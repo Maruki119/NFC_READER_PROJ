@@ -8,10 +8,11 @@ import os
 from ftplib import FTP
 from email.message import EmailMessage
 from io import BytesIO  # สำหรับดาวน์โหลดข้อมูลจาก FTP เป็น bytes
+import datetime  # สำหรับบันทึกเวลา
 
 # ===================== Global Data =====================
 card_data = {}       # สำหรับข้อมูล OTP และสถานะการลงทะเบียน: { card_id: {"email": ..., "otp": ..., "registered": ...} }
-accounts_data = {}   # สำหรับข้อมูลบัญชีผู้ใช้: { card_id: {"card_id":..., "balance":..., "email":..., "top_up_history":..., "transaction_log":...} }
+accounts_data = {}   # สำหรับข้อมูลบัญชีผู้ใช้: { card_id: {"card_id":..., "balance":..., "email":..., "top_up_history":..., "transaction_log": ...} }
 
 # ===================== ฟังก์ชันส่ง OTP =====================
 def generate_otp(length=6):
@@ -23,10 +24,10 @@ def send_otp_by_email(receiver_email, otp):
     ตัวอย่างการส่งอีเมล OTP (โค้ดจำลองการส่ง)
     หากต้องการส่งจริงให้แก้ smtp_server, port, sender_email, password
     """
-    smtp_server = "smtp.gmail.com"  
-    port = 587  
-    sender_email = "nakrobpanejohn@gmail.com"   
-    password = "xkgd alam gjvj gwzc"  
+    smtp_server = "smtp.gmail.com"
+    port = 587
+    sender_email = "nakrobpanejohn@gmail.com"
+    password = "xkgd alam gjvj gwzc"
 
     message = EmailMessage()
     message.set_content(f"Your OTP is: {otp}")
@@ -51,10 +52,10 @@ def download_json_from_ftp(card_id):
     ถ้ามี: ดาวน์โหลดและคืนค่าเป็น dict
     ถ้าไม่มีหรือเกิดข้อผิดพลาด: คืนค่า None
     """
-    ftp_host = "localhost"    
-    ftp_port = 21          
-    ftp_user = "admin"        
-    ftp_pass = "admin"        
+    ftp_host = "localhost"
+    ftp_port = 21
+    ftp_user = "admin"
+    ftp_pass = "admin"
     target_file = f"{card_id}.json"
     
     ftp = FTP()
@@ -91,13 +92,13 @@ def generate_and_upload_json(card_id, card_data):
     2) อัปโหลดไฟล์ JSON ไปยัง FTP Server ในโฟลเดอร์ card_id
     3) ลบไฟล์ JSON ที่สร้างไว้ในเครื่อง
     """
-    ftp_host = "localhost"    
-    ftp_port = 21          
-    ftp_user = "admin"        
-    ftp_pass = "admin"        
+    ftp_host = "localhost"
+    ftp_port = 21
+    ftp_user = "admin"
+    ftp_pass = "admin"
 
-    local_filename = f"{card_id}.json"   
-    remote_filename = f"{card_id}.json"  
+    local_filename = f"{card_id}.json"
+    remote_filename = f"{card_id}.json"
 
     with open(local_filename, 'w', encoding='utf-8') as f:
         json.dump(card_data, f, ensure_ascii=False, indent=4)
@@ -134,9 +135,9 @@ def generate_and_upload_json(card_id, card_data):
 def send_otp():
     """
     1. ดึง Card ID กับ Email จากช่องกรอก
-    2. สร้าง OTP และบันทึกใน card_data
-    3. ส่งอีเมล OTP
-    4. แจ้งสถานะการส่ง OTP
+    2. ตรวจสอบว่ามี Card ID นี้ใน FTP Server อยู่หรือไม่
+       - ถ้ามี: แสดงข้อความแจ้งว่า Card ID มีอยู่แล้วและไม่ส่ง OTP
+       - ถ้าไม่: สร้าง OTP ส่งอีเมลและแสดง popup แจ้งว่า OTP ถูกส่งเรียบร้อยแล้ว
     """
     card_id = card_id_var.get().strip()
     email = email_var.get().strip()
@@ -146,6 +147,13 @@ def send_otp():
         return
     if not email:
         status_var.set("กรุณาใส่ Email")
+        return
+
+    # ตรวจสอบว่ามี Card ID นี้ใน FTP Server อยู่หรือไม่
+    ftp_data = download_json_from_ftp(card_id)
+    if ftp_data is not None:
+        status_var.set("Card ID มีอยู่แล้วในระบบ FTP")
+        messagebox.showerror("Error", f"Card ID {card_id} มีอยู่แล้วในระบบ FTP ไม่สามารถส่ง OTP ได้")
         return
 
     new_otp = generate_otp()
@@ -158,11 +166,14 @@ def send_otp():
 
     send_otp_by_email(email, new_otp)
     status_var.set(f"OTP sent to {email} (ตัวอย่าง OTP: {new_otp})")
+    messagebox.showinfo("OTP Sent", f"OTP ถูกส่งไปยัง {email} เรียบร้อยแล้ว!")
 
 def confirm_otp():
     """
     1. ตรวจสอบ OTP ที่กรอกกับข้อมูลใน card_data
-    2. ถ้า OTP ถูกต้อง: สร้างข้อมูลบัญชีและอัปโหลดไปยัง FTP
+    2. ถ้า OTP ถูกต้อง: ตรวจสอบว่าลงทะเบียนไปแล้วหรือยังโดยดูจาก FTP Server
+       - ถ้าลงทะเบียนไปแล้ว: แจ้งเตือนไม่ให้ลงทะเบียนซ้ำ
+       - ถ้ายังไม่ลงทะเบียน: สร้างข้อมูลบัญชีและอัปโหลดไปยัง FTP
     3. แสดงข้อความแจ้งทำงานสำเร็จ
     """
     card_id = card_id_var.get().strip()
@@ -174,6 +185,13 @@ def confirm_otp():
 
     correct_otp = card_data[card_id]["otp"]
     if input_otp == correct_otp:
+        # ตรวจสอบใน FTP Server ว่ามีข้อมูล card_id อยู่หรือไม่
+        ftp_data = download_json_from_ftp(card_id)
+        if ftp_data is not None:
+            status_var.set("Card นี้ลงทะเบียนไปแล้ว ไม่สามารถลงทะเบียนซ้ำได้")
+            messagebox.showerror("Error", "Card นี้ลงทะเบียนไปแล้ว กรุณาใช้ Card อื่น หรือเข้าสู่ระบบเติมเงิน")
+            return
+
         card_data[card_id]["registered"] = True
         sample_data = {
             "card_id": card_id,
@@ -244,13 +262,16 @@ def open_top_up_window():
         accounts_data[card_id] = ftp_data
         account = accounts_data[card_id]
         account["balance"] += amount
-        account["top_up_history"].append({"amount": amount})
+        
+        # บันทึกเวลาเติมเงิน
+        timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        account["top_up_history"].append({"amount": amount, "time": timestamp})
         
         # อัปเดตไฟล์ JSON บน FTP ด้วยข้อมูลที่อัปเดตแล้ว
         generate_and_upload_json(card_id, account)
         
         top_status_var.set(f"เติมเงินสำเร็จ! ยอดเงินใหม่: {account['balance']}")
-        messagebox.showinfo("Success", f"เติมเงินสำเร็จ! ยอดเงินใหม่: {account['balance']} ทำงานสำเร็จ")
+        messagebox.showinfo("Success", f"เติมเงินสำเร็จ!\nยอดเงินใหม่: {account['balance']}\nเวลา: {timestamp}\nทำงานสำเร็จ")
     
     Button(frame_top, text="Top Up", font=('TH Sarabun New', 14, 'bold'),
            command=perform_top_up, bg="light green").grid(row=2, column=0, columnspan=2, pady=10)
