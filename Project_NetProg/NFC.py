@@ -104,7 +104,7 @@ class NFC_Reader():
             return None
 
 # ===================== FTP CONFIG =====================
-ftp_host = "localhost"
+ftp_host = "172.20.10.7"
 ftp_port = 21
 ftp_user = "Maruki119"
 ftp_pass = "Maruki119"
@@ -193,7 +193,7 @@ f1.pack(side=TOP)
 card_id_var   = StringVar()
 entry_var     = StringVar(value="ด่าน A")
 exit_var      = StringVar(value="ด่าน B")
-balance_var   = StringVar(value="300")
+balance_var   = StringVar()
 cost_var      = StringVar(value="0")
 signal_status = StringVar()
 signal_color  = StringVar(value="light grey")
@@ -233,7 +233,7 @@ def thread_ab():
         print("ไม่พบข้อมูลการ์ดใน FTP")
         update_signal(False)
         return
-
+    
     balance = float(card_data.get("balance", 0))
     balance_var.set(str(balance))
 
@@ -270,6 +270,24 @@ def thread_cd(card_data):
 
     generate_and_upload_json(card_id, card_data)
 
+def reset_fields():
+    reader = NFC_Reader()
+    card_id = reader.read_uid().replace(" ", "_")
+    
+    card_id_var.set(card_id)
+    card_data = download_card_data(card_id)
+    if card_data is None:
+        print("ไม่พบข้อมูลการ์ดใน FTP")
+        update_signal(False)
+        
+    try:
+        balance = float(card_data.get("balance", 0))
+        balance_var.set(str(balance))
+        print("Card id:", card_id)
+    except:
+        balance_var.set("0")
+        print("Please register!!")
+
 # ===================== ส่วนบน =====================
 Label(Tops, font=('TH Saraban New', 40, 'bold'), text="ระบบชำระค่าทางด่วน", fg="Blue", bd=10, anchor='w', bg="seashell2").grid(row=0, column=0)
 Label(Tops, font=('TH Saraban New', 16, 'bold'), text=datetime.datetime.now().strftime("%c"), fg="Blue", bd=10, anchor='w', bg="seashell2").grid(row=1, column=0)
@@ -293,6 +311,9 @@ Label(f1, textvariable=cost_var, font=('TH Sarabun New', 18), bg="powder blue", 
 Label(f1, text="Signal:", font=('TH Sarabun New', 18, 'bold'), bg="seashell2").grid(row=2, column=2, padx=10, pady=10, sticky='e')
 Label(f1, textvariable=signal_status, font=('TH Sarabun New', 18, 'bold'), width=16, fg="white", bg=signal_color.get()).grid(row=2, column=3, padx=10, pady=10)
 
+Button(f1, text="Reset", font=('TH Sarabun New', 14, 'bold'),
+       command=reset_fields, bg="orange").grid(row=3, column=2, padx=5, pady=20, sticky='e')
+
 Label(f1, text="Mode:", font=('TH Sarabun New', 18, 'bold'), bg="seashell2").grid(row=3, column=0, padx=10, pady=10, sticky='e')
 Radiobutton(f1, text="Entry", variable=mode_var, value="entry", font=('TH Sarabun New', 16), bg="seashell2").grid(row=3, column=1, sticky='w')
 Radiobutton(f1, text="Exit", variable=mode_var, value="exit", font=('TH Sarabun New', 16), bg="seashell2").grid(row=3, column=1, sticky='e')
@@ -306,6 +327,19 @@ card_id = reader.read_uid()
 
 card_id_var.set(card_id)
 
-print("Card id:", card_id)
+card_data = download_card_data(card_id)
+if card_data is None:
+    print("ไม่พบข้อมูลการ์ดใน FTP")
+    update_signal(False)
+    
+try:
+    balance = float(card_data.get("balance", 0))
+    balance_var.set(str(balance))
+
+    print("Card id:", card_id)
+except:
+    print("Please register!!")
+    balance_var.set("0")
 
 root.mainloop()
+
