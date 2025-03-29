@@ -1,29 +1,115 @@
 from tkinter import *
-from tkinter import messagebox  # นำเข้า messagebox สำหรับแสดง popup
+from tkinter import messagebox
 import random
 import ssl
 import smtplib
 import json
+import time
 import os
 from ftplib import FTP
 from email.message import EmailMessage
-from io import BytesIO  # สำหรับดาวน์โหลดข้อมูลจาก FTP เป็น bytes
-import datetime  # สำหรับบันทึกเวลา
+from io import BytesIO
+import datetime
+from smartcard.scard import *
+from smartcard.util import toHexString
 
-# ===================== Global Data =====================
-card_data = {}       # สำหรับข้อมูล OTP และสถานะการลงทะเบียน: { card_id: {"email": ..., "otp": ..., "registered": ...} }
-accounts_data = {}   # สำหรับข้อมูลบัญชีผู้ใช้: { card_id: {"card_id":..., "balance":..., "email":..., "top_up_history":..., "transaction_log": ...} }
+# ===================== NFC READER =====================
+VERBOSE = False
 
-# ===================== ฟังก์ชันส่ง OTP =====================
+BLOCK_NUMBER = 0x04
+AUTHENTICATE = [0xFF, 0x88, 0x00, BLOCK_NUMBER, 0x60, 0x00]
+GET_UID = [0xFF, 0xCA, 0x00, 0x00, 0x04]
+READ_16_BINARY_BLOCKS = [0xFF, 0xB0, 0x00, 0x04, 0x10]
+UPDATE_FIXED_BLOCKS = [0xFF, 0xD6, 0x00, BLOCK_NUMBER, 0x10]
+
+class NFC_Reader():
+    def __init__(self, uid=""):
+        self.uid = uid
+        self.hresult, self.hcontext = SCardEstablishContext(SCARD_SCOPE_USER)
+        self.hresult, self.readers = SCardListReaders(self.hcontext, [])
+        assert len(self.readers) > 0
+        self.reader = self.readers[0]
+        print("Found reader: " + str(self.reader))
+
+        self.hresult, self.hcard, self.dwActiveProtocol = SCardConnect(
+            self.hcontext,
+            self.reader,
+            SCARD_SHARE_SHARED,
+            SCARD_PROTOCOL_T0 | SCARD_PROTOCOL_T1)
+
+    def send_command(self, command):
+        print("Sending command...")
+        for iteration in range(1):
+            try:
+                self.hresult, self.response = SCardTransmit(self.hcard, self.dwActiveProtocol, command)
+                value = toHexString(self.response, format=0)
+                if VERBOSE:
+                    print("Value: " + value + " , Response:  " + str(self.response) + " HResult: " + str(self.hresult))
+            except Exception as e:
+                print("No Card Found")
+                print("Eror:", e)
+                return None, None
+            time.sleep(1)
+        print("------------------------\n")
+        return self.response, value
+
+    def read_uid(self):
+        print("Waiting for card...")
+        while True:
+            try:
+                response, uid = self.send_command(GET_UID)
+                if response:
+                    print("Found!")
+                    self.uid = uid
+                    return uid.replace(" ", "_")
+            except Exception as e:
+                print("Error:", e)
+                print("Card Not Found")
+    
+            # ลอง reconnect ใหม่ทุกครั้งที่ล้มเหลว
+            try:
+                self.hresult, self.hcard, self.dwActiveProtocol = SCardConnect(
+                    self.hcontext,
+                    self.reader,
+                    SCARD_SHARE_SHARED,
+                    SCARD_PROTOCOL_T0 | SCARD_PROTOCOL_T1)
+            except Exception as e:
+                print("Reconnect failed:", e)
+    
+            time.sleep(1)
+            
+
+    def write_data(self, string):
+        int_array = list(map(ord, string))
+        print("Writing data: " + str(int_array))
+        if len(int_array) > 16:
+            return
+        command = UPDATE_FIXED_BLOCKS + int_array + [0x00] * (16 - len(int_array))
+        response, _ = self.send_command(AUTHENTICATE)
+        if response == [144, 0]:
+            print("Authentication successful. Writing data...")
+            self.send_command(command)
+        else:
+            print("Unable to authenticate.")
+
+    def read_data(self):
+        response, _ = self.send_command(AUTHENTICATE)
+        if response == [144, 0]:
+            _, value = self.send_command(READ_16_BINARY_BLOCKS)
+            return value
+        else:
+            print("Unable to authenticate.")
+            return None
+
+# ===================== Data =====================
+card_data = {}
+accounts_data = {}
+
+# ===================== Email =====================
 def generate_otp(length=6):
-    """สร้างรหัส OTP จำนวน length หลัก (ค่าเริ่มต้น 6)"""
     return ''.join(str(random.randint(0, 9)) for _ in range(length))
 
 def send_otp_by_email(receiver_email, otp):
-    """
-    ตัวอย่างการส่งอีเมล OTP (โค้ดจำลองการส่ง)
-    หากต้องการส่งจริงให้แก้ smtp_server, port, sender_email, password
-    """
     smtp_server = "smtp.gmail.com"
     port = 587
     sender_email = "nakrobpanejohn@gmail.com"
@@ -45,38 +131,30 @@ def send_otp_by_email(receiver_email, otp):
     except Exception as e:
         print("Error sending email:", e)
 
-# ===================== ฟังก์ชันสำหรับดาวน์โหลดข้อมูล JSON จาก FTP =====================
+# ===================== FTP =====================
 def download_json_from_ftp(card_id):
-    """
-    ตรวจสอบว่ามีไฟล์ JSON สำหรับ card_id ใน FTP Server หรือไม่
-    ถ้ามี: ดาวน์โหลดและคืนค่าเป็น dict
-    ถ้าไม่มีหรือเกิดข้อผิดพลาด: คืนค่า None
-    """
     ftp_host = "localhost"
     ftp_port = 21
-    ftp_user = "admin"
-    ftp_pass = "admin"
+    ftp_user = "Maruki119"
+    ftp_pass = "Maruki119"
     target_file = f"{card_id}.json"
-    
+
     ftp = FTP()
     try:
-        print(f"Connecting to FTP server {ftp_host}:{ftp_port} ...")
         ftp.connect(ftp_host, ftp_port)
         ftp.login(ftp_user, ftp_pass)
         ftp.set_pasv(True)
         ftp.cwd(card_id)
         files = ftp.nlst()
         if target_file not in files:
-            print(f"File '{target_file}' not found in folder '{card_id}'")
             ftp.quit()
             return None
-        
+
         bio = BytesIO()
         ftp.retrbinary('RETR ' + target_file, bio.write)
         ftp.quit()
         bio.seek(0)
-        data = bio.read().decode('utf-8')
-        return json.loads(data)
+        return json.loads(bio.read().decode('utf-8'))
     except Exception as e:
         print("FTP Error while downloading:", e)
         try:
@@ -85,51 +163,34 @@ def download_json_from_ftp(card_id):
             pass
         return None
 
-# ===================== ฟังก์ชันสำหรับสร้างและอัปโหลดไฟล์ JSON ไปยัง FTP =====================
 def generate_and_upload_json(card_id, card_data):
-    """
-    1) สร้างไฟล์ JSON ในเครื่องจาก card_data
-    2) อัปโหลดไฟล์ JSON ไปยัง FTP Server ในโฟลเดอร์ card_id
-    3) ลบไฟล์ JSON ที่สร้างไว้ในเครื่อง
-    """
     ftp_host = "localhost"
     ftp_port = 21
-    ftp_user = "admin"
-    ftp_pass = "admin"
+    ftp_user = "Maruki119"
+    ftp_pass = "Maruki119"
 
     local_filename = f"{card_id}.json"
-    remote_filename = f"{card_id}.json"
-
     with open(local_filename, 'w', encoding='utf-8') as f:
         json.dump(card_data, f, ensure_ascii=False, indent=4)
-    print(f"JSON file '{local_filename}' created.")
 
     ftp = FTP()
     try:
-        print(f"Connecting to FTP server {ftp_host}:{ftp_port} ...")
         ftp.connect(ftp_host, ftp_port)
         ftp.login(ftp_user, ftp_pass)
         ftp.set_pasv(True)
         try:
             ftp.mkd(card_id)
-            print(f"Directory '{card_id}' created on FTP server.")
-        except Exception as e:
-            print(f"Could not create directory '{card_id}' (maybe it already exists): {e}")
+        except:
+            pass
         ftp.cwd(card_id)
         with open(local_filename, 'rb') as f:
-            ftp.storbinary(f'STOR {remote_filename}', f)
-        print(f"Uploaded '{local_filename}' as '{remote_filename}' into folder '{card_id}'")
+            ftp.storbinary(f'STOR {card_id}.json', f)
         ftp.quit()
     except Exception as e:
         print("FTP Error:", e)
         if ftp:
             ftp.close()
-
-    try:
-        os.remove(local_filename)
-        print(f"Local file '{local_filename}' has been deleted.")
-    except Exception as e:
-        print(f"Error deleting local file '{local_filename}': {e}")
+    os.remove(local_filename)
 
 # ===================== ฟังก์ชันสำหรับ GUI การลงทะเบียน =====================
 def send_otp():
@@ -217,9 +278,8 @@ def open_top_up_window():
     top_window.title("Top Up")
     top_window.configure(bg="seashell2")
     
-    top_card_id_var = StringVar()
-    top_amount_var = StringVar()
-    top_status_var = StringVar()
+
+    top_card_id_var.set(card_id)
     
     Label(top_window, text="Top Up", font=('TH Saraban New', 20, 'bold'),
           bg="seashell2", fg="blue").pack(pady=10)
@@ -229,13 +289,15 @@ def open_top_up_window():
     
     Label(frame_top, text="Card ID:", font=('TH Sarabun New', 16, 'bold'),
           bg="seashell2").grid(row=0, column=0, padx=5, pady=5, sticky='e')
-    Entry(frame_top, textvariable=top_card_id_var, font=('TH Sarabun New', 16),
+    Label(frame_top, textvariable=top_card_id_var, font=('TH Sarabun New', 16),
           width=20, bg="white").grid(row=0, column=1, padx=5, pady=5)
     
     Label(frame_top, text="Amount:", font=('TH Sarabun New', 16, 'bold'),
           bg="seashell2").grid(row=1, column=0, padx=5, pady=5, sticky='e')
     Entry(frame_top, textvariable=top_amount_var, font=('TH Sarabun New', 16),
           width=20, bg="white").grid(row=1, column=1, padx=5, pady=5)
+    
+    
     
     def perform_top_up():
         card_id = top_card_id_var.get().strip()
@@ -284,7 +346,12 @@ def open_top_up_window():
 
 # ===================== ฟังก์ชันสำหรับ Reset และ Exit =====================
 def reset_fields():
-    card_id_var.set("")
+    reader = NFC_Reader()
+    card_id = reader.read_uid().replace(" ", "_")
+    
+    card_id_var.set(card_id)
+    top_card_id_var.set(card_id)
+    
     email_var.set("")
     otp_var.set("")
     status_var.set("")
@@ -303,6 +370,10 @@ email_var = StringVar()
 otp_var = StringVar()
 status_var = StringVar()  # สำหรับแสดงสถานะ/ข้อความ
 
+top_card_id_var = StringVar()
+top_amount_var = StringVar()
+top_status_var = StringVar()
+
 # Title
 Label(root, text="NFC Card Registration", font=('TH Saraban New', 24, 'bold'),
       bg="seashell2", fg="blue").pack(pady=10)
@@ -313,7 +384,7 @@ frame_main.pack(pady=10)
 
 Label(frame_main, text="Card ID:", font=('TH Sarabun New', 16, 'bold'),
       bg="seashell2").grid(row=0, column=0, padx=5, pady=5, sticky='e')
-Entry(frame_main, textvariable=card_id_var, font=('TH Sarabun New', 16),
+Label(frame_main, textvariable=card_id_var, font=('TH Sarabun New', 16),
       width=20, bg="white").grid(row=0, column=1, padx=5, pady=5)
 
 Label(frame_main, text="Email:", font=('TH Sarabun New', 16, 'bold'),
@@ -344,5 +415,13 @@ Button(root, text="Top Up", font=('TH Sarabun New', 14, 'bold'),
 
 Label(root, textvariable=status_var, font=('TH Sarabun New', 16, 'bold'),
       fg="red", bg="seashell2").pack(pady=10)
+
+reader = NFC_Reader()
+
+card_id = reader.read_uid()
+
+card_id_var.set(card_id)
+
+print("Card id:", card_id)
 
 root.mainloop()
